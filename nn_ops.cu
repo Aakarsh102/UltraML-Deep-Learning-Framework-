@@ -55,3 +55,21 @@ void destroyNNContext(NNContext* context) {
     }
 }
 
+
+// ============ TENSOR OPERATIONS ============
+
+Tensor* nn_create_tensor(int* shape, int ndim) {
+    Tensor* t = (Tensor*)malloc(sizeof(Tensor));
+    t -> ndim = ndim;
+    t -> shape = (int*)malloc(ndim * sizeof(int));
+    t -> size = 1;
+    int i = 0;
+    while (i < ndim) {
+        t -> shape[i] = shape[i];
+        t -> size *= shapep[i];
+        i++;
+    }
+    CUDA_CHECK(cudaMalloc(&t -> data, t -> size * sizeof(float)));
+    return t; 
+}
+
