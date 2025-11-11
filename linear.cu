@@ -38,35 +38,98 @@ __global__ void add_bias_kernel(float *input, float *bias, int total_elements, i
     }
 }
 
-void nn_linear_forward(NNContext* context,
-                           const Tensor* input, 
-                           const Tensor* weight,
-                           const Tensor* bias,
-                           Tensor* output
-                    ) {
 
-        int batch_size = input->shape[0];
-        int input_dim = input->shape[1];
-        int output_dim = weight->shape[0];
-        // I'll be doing output = x * W^T + b
-
-        const float alpha = 1.0f;
-        const float beta = 0.0f;
-        CUBLAS_CHECK(cublasSgemm(
-            context -> cublas_handle,
-            CUBLAS_OP_T, CUBLAS_OP_N,
-            output_dim, batch_size, input_dim, &alpha,
-            weight -> data, input_dim, input -> data, batch_size, &beta,
-            output -> data, output_dim 
-        ));
-        if (bias != nullptr) {
-            int total_elems = batch_size * output_dim;
-            int threadsPerBlock = 256;
-            int blocksPerGrid = (total_elems + threadsPerBlock - 1) / threadsPerBlock;
-            add_bias_kernel<<<blocksPerGrid, threadsPerBlock>>> (output -> data, bias -> data, total_elems, output_dim);
+// ============ LINEAR LAYER ============
+void nn_linear_forward(NNContext* ctx, 
+                       Tensor* input,    // [batch, in_features]
+                       Tensor* weight,   // [out_features, in_features]
+                       Tensor* bias,     // [out_features]
+                       Tensor* output)   // [batch, out_features]
+{
+    int batch = input->shape[0];
+    int in_features = input->shape[1];
+    int out_features = weight->shape[0];
+    
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    
+    // output = input @ weight^T
+    // C = alpha * A * B + beta * C
+    // output[batch, out_features] = input[batch, in_features] @ weight^T[in_features, out_features]
+    CUBLAS_CHECK(cublasSgemm(ctx->cublas_handle,
+                            CUBLAS_OP_T, CUBLAS_OP_N,
+                            out_features, batch, in_features,
+                            &alpha,
+                            weight->data, in_features,
+                            input->data, in_features,
+                            &beta,
+                            output->data, out_features));
+    
+    // Add bias (broadcast)
+    if (bias != NULL) {
+        __global__ void add_bias_kernel(float* output, const float* bias, 
+                                       int batch, int features) {
+            int idx = blockIdx.x * blockDim.x + threadIdx.x;
+            int total = batch * features;
+            if (idx < total) {
+                int feat = idx % features;
+                output[idx] += bias[feat];
+            }
         }
         
-
-
-
+        int total = batch * out_features;
+        int threads = 256;
+        int blocks = (total + threads - 1) / threads;
+        add_bias_kernel<<<blocks, threads>>>(output->data, bias->data, 
+                                            batch, out_features);
+        CUDA_CHECK(cudaDeviceSynchronize());
     }
+}
+
+void nn_linear_backward(NNContext* ctx,
+                        Tensor* grad_output,  // [batch, out_features]
+                        Tensor* input,        // [batch, in_features]
+                        Tensor* weight,       // [out_features, in_features]
+                        Tensor* grad_input,   // [batch, in_features]
+                        Tensor* grad_weight,  // [out_features, in_features]
+                        Tensor* grad_bias)    // [out_features]
+{
+    int batch = input->shape[0];
+    int in_features = input->shape[1];
+    int out_features = weight->shape[0];
+    
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    
+    // grad_input = grad_output @ weight
+    // grad_input[batch, in_features] = grad_output[batch, out_features] @ weight[out_features, in_features]
+    CUBLAS_CHECK(cublasSgemm(ctx->cublas_handle,
+                            CUBLAS_OP_N, CUBLAS_OP_N,
+                            in_features, batch, out_features,
+                            &alpha,
+                            weight->data, in_features,
+                            grad_output->data, out_features,
+                            &beta,
+                            grad_input->data, in_features));
+    
+    // grad_weight = grad_output^T @ input
+    // grad_weight[out_features, in_features] = grad_output^T[out_features, batch] @ input[batch, in_features]
+    CUBLAS_CHECK(cublasSgemm(ctx->cublas_handle,
+                            CUBLAS_OP_N, CUBLAS_OP_T,
+                            in_features, out_features, batch,
+                            &alpha,
+                            input->data, in_features,
+                            grad_output->data, out_features,
+                            &beta,
+                            grad_weight->data, in_features));
+    
+    // grad_bias = sum(grad_output, dim=0)
+    if (grad_bias != NULL) {
+    
+        int threads = 256;
+        int blocks = (out_features + threads - 1) / threads;
+        sum_grad_bias_kernel<<<blocks, threads>>>(grad_output->data, grad_bias->data,
+                                                  batch, out_features);
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
+}

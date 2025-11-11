@@ -1,75 +1,89 @@
 #include "nn_ops.h"
 #include <stdio.h>
-#include <stdlib.h>
 #include <math.h>
 
-#define CUDA_CHECK(call)                                                   \
-    do {                                                                   \
-        cudaError_t err = call;                                            \
-        if (err != cudaSuccess) {                                          \
-            fprintf(stderr, "CUDA error in file '%s' in line %i : %s.\n",  \
-                    __FILE__, __LINE__, cudaGetErrorString(err));          \
-            exit(EXIT_FAILURE);                                            \
-        }                                                                  \
-    } while (0)
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t err = call; \
+        if (err != cudaSuccess) { \
+            fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                    cudaGetErrorString(err)); \
+            exit(EXIT_FAILURE); \
+        } \
+    } while(0)
 
-#define CUBLAS_CHECK(call)                                                 \
-    do {                                                                   \
-        cublasStatus_t status = call;                                       \
-        if (status != CUBLAS_STATUS_SUCCESS) {                              \
-            fprintf(stderr, "CUBLAS error in file '%s' in line %i.\n",      \
-                    __FILE__, __LINE__);                                    \
-            exit(EXIT_FAILURE);                                            \
-        }                                                                  \
-    } while (0)
+#define CUBLAS_CHECK(call) \
+    do { \
+        cublasStatus_t stat = call; \
+        if (stat != CUBLAS_STATUS_SUCCESS) { \
+            fprintf(stderr, "cuBLAS error at %s:%d\n", __FILE__, __LINE__); \
+            exit(EXIT_FAILURE); \
+        } \
+    } while(0)
 
-#define CUDNN_CHECK(call)                                                 \
-    do {                                                                   \
-        cudnnStatus_t status = call;                                       \
-        if (status != CUDNN_STATUS_SUCCESS) {                              \
-            fprintf(stderr, "CUDNN error in file '%s' in line %i : %s.\n",    \
-                    __FILE__, __LINE__, cudnnGetErrorString(status));          \
-            exit(EXIT_FAILURE);                                            \
-        }                                                                  \
-    } while (0)
+#define CUDNN_CHECK(call) \
+    do { \
+        cudnnStatus_t stat = call; \
+        if (stat != CUDNN_SUCCESS) { \
+            fprintf(stderr, "cuDNN error at %s:%d: %s\n", __FILE__, __LINE__, \
+                    cudnnGetErrorString(stat)); \
+            exit(EXIT_FAILURE); \
+        } \
+    } while(0)
 
-
-// Using NNContext from nn_ops.h that has cudNNHandle_t and CUBLASHandle_t
-
-NNContext* createNNContext() {
-    NNContext *context = (NNContext*)malloc(sizeof(NNContext));
-    if (context == NULL) {
-        fprintf(stderr, "error allocating NNContext\n");
-        exit(EXIT_FAILURE);
-    }
-    CUDNN_CHECK(cudnnCreate(&context -> cudnnHandle));
-    CUBLAS_CHECK(cublasCreate(&context -> cublasHandle));
-    return context;
+// ============ CONTEXT MANAGEMENT ============
+NNContext* nn_create_context() {
+    NNContext* ctx = (NNContext*)malloc(sizeof(NNContext));
+    CUBLAS_CHECK(cublasCreate(&ctx->cublas_handle));
+    CUDNN_CHECK(cudnnCreate(&ctx->cudnn_handle));
+    return ctx;
 }
 
-void destroyNNContext(NNContext* context) {
-    if (context != NULL) {
-        CUDNN_CHECK(cudnnDestroy(context -> cudnnHandle));
-        CUBLAS_CHECK(cublasDestroy(context -> cublasHandle));
-        free(context);
-    }
+void nn_destroy_context(NNContext* ctx) {
+    CUBLAS_CHECK(cublasDestroy(ctx->cublas_handle));
+    CUDNN_CHECK(cudnnDestroy(ctx->cudnn_handle));
+    free(ctx);
 }
-
 
 // ============ TENSOR OPERATIONS ============
-
 Tensor* nn_create_tensor(int* shape, int ndim) {
     Tensor* t = (Tensor*)malloc(sizeof(Tensor));
-    t -> ndim = ndim;
-    t -> shape = (int*)malloc(ndim * sizeof(int));
-    t -> size = 1;
-    int i = 0;
-    while (i < ndim) {
-        t -> shape[i] = shape[i];
-        t -> size *= shapep[i];
-        i++;
+    t->ndim = ndim;
+    t->shape = (int*)malloc(ndim * sizeof(int));
+    
+    t->size = 1;
+    for (int i = 0; i < ndim; i++) {
+        t->shape[i] = shape[i];
+        t->size *= shape[i];
     }
-    CUDA_CHECK(cudaMalloc(&t -> data, t -> size * sizeof(float)));
-    return t; 
+    
+    CUDA_CHECK(cudaMalloc(&t->data, t->size * sizeof(float)));
+    return t;
 }
+
+void nn_free_tensor(Tensor* t) {
+    CUDA_CHECK(cudaFree(t->data));
+    free(t->shape);
+    free(t);
+}
+
+__global__ void fill_kernel(float* data, int size, float value) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        data[idx] = value;
+    }
+}
+
+void nn_fill_tensor(Tensor* t, float value) {
+    int threads = 256;
+    int blocks = (t->size + threads - 1) / threads;
+    fill_kernel<<<blocks, threads>>>(t->data, t->size, value);
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void nn_copy_tensor(Tensor* dst, Tensor* src) {
+    CUDA_CHECK(cudaMemcpy(dst->data, src->data, src->size * sizeof(float),
+                         cudaMemcpyDeviceToDevice));
+}
+
 
