@@ -1,17 +1,15 @@
 #pragma once
 
-// Forward-declaration of the autograd graph node. The node definition is
-// intentionally left out of this build; ops today do not touch it. When the
-// autograd module is added, it will:
+// Forward-declaration of the autograd graph node so Tensor can carry a
+// grad_fn pointer without core/ depending on the autograd module. The full
+// definition lives in autograd/autograd.h: a node holds the op name, the
+// input tensors, the output, and a backward closure that captures whatever
+// the forward pass saved.
 //
-//   1. define AutogradNode with (inputs, backward_fn, saved_tensors),
-//   2. set Tensor::grad_fn on outputs during forward passes,
-//   3. invoke the same backward() functions declared in this framework,
-//      passing the tensors it saved during forward.
-//
-// Every backward function in ultraml already takes its required "saved"
-// tensors as explicit parameters, so autograd can be layered on top without
-// re-implementing any kernel.
+// Ops themselves stay autograd-agnostic: every backward function in ultraml
+// takes its required "saved" tensors as explicit parameters, and the
+// recorded closures in autograd/ops.cu simply call those same functions.
+// Code that only uses the low-level kernels never touches this type.
 
 namespace ultraml {
 
